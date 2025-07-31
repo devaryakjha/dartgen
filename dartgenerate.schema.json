@@ -35,11 +35,20 @@
             "type": "string",
             "description": "Custom output file name for this generator. Optional."
           },
-          "if": {
-            "properties": {
-              "type": {
-                "const": "index"
-              }
+          "exclude": {
+            "type": "array",
+            "description": "Patterns to exclude from processing. Can be file names, folder names, or glob patterns. Only valid when type is 'index'. Optional.",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": ["dir", "type"],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": { "type": { "const": "index" } }
             },
             "then": {
               "properties": {
@@ -52,11 +61,13 @@
                 }
               }
             },
-            "else": false
+            "else": {
+              "not": {
+                "required": ["exclude"]
+              }
+            }
           }
-        },
-        "required": ["dir", "type"],
-        "additionalProperties": false
+        ]
       }
     }
   },
