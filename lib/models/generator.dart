@@ -34,7 +34,7 @@ class GeneratorConfig {
     type = _data['type'] ?? type;
     recursive = _data['recursive'] ?? false;
     outputFile = _data['output_file'] ?? outputFile;
-    exclude = _data['exclude'] ?? exclude;
+    exclude = _data['exclude']?.cast<String>() ?? [];
   }
 
   static GeneratorConfig? fromMap(Map? data) {
