@@ -3,6 +3,7 @@ import 'package:glob/glob.dart';
 import 'package:dart_style/dart_style.dart';
 import 'package:analyzer/dart/analysis/utilities.dart';
 import 'package:analyzer/dart/ast/ast.dart';
+import 'package:path/path.dart' as p show basename, dirname, separator;
 import 'package:pub_semver/pub_semver.dart' show Version;
 
 export 'package:analyzer/dart/ast/ast.dart';
@@ -132,4 +133,60 @@ List<String> getTagArgs(Declaration i) {
   final val = annotation.arguments!.arguments[1] as SimpleStringLiteral;
 
   return val.value.split(',');
+}
+
+/// Checks if a file path should be excluded based on exclusion patterns
+bool shouldExcludeFile(String filePath, List<String> excludePatterns) {
+  if (excludePatterns.isEmpty) return false;
+
+  final fileName = p.basename(filePath);
+  final relativePath = p.dirname(filePath);
+
+  return excludePatterns.any((pattern) => switch (pattern) {
+        // Exact file name match
+        String s when s == fileName => true,
+
+        // Glob patterns (most complex, check first)
+        String s when s.contains('*') =>
+          _matchesGlobPattern(s, filePath, relativePath),
+
+        // Path patterns (containing directory separators)
+        String s when s.contains(p.separator) => filePath.contains(s),
+
+        // Wildcard patterns: "*text*"
+        String s when s.startsWith('*') && s.endsWith('*') =>
+          fileName.contains(s.substring(1, s.length - 1)),
+
+        // Suffix patterns: "*.dart"
+        String s when s.startsWith('*') => fileName.endsWith(s.substring(1)),
+
+        // Prefix patterns: "test*"
+        String s when s.endsWith('*') =>
+          fileName.startsWith(s.substring(0, s.length - 1)),
+
+        // Simple string matching (fallback)
+        _ => filePath.contains(pattern),
+      });
+}
+
+/// Helper function to handle glob pattern matching
+bool _matchesGlobPattern(String pattern, String filePath, String relativePath) {
+  try {
+    final glob = Glob(pattern);
+    return glob.matches(filePath) || glob.matches(relativePath);
+  } catch (e) {
+    // If pattern is not a valid glob, treat as simple string match
+    return filePath.contains(pattern);
+  }
+}
+
+/// Lists Dart files excluding those that match exclusion patterns
+List<String?> listDartFilesWithExclusions(
+    String path, List<String> excludePatterns,
+    [bool recursive = false]) {
+  final allFiles = listFiles(path, recursive, false);
+  return allFiles
+      .where(
+          (file) => file != null && !shouldExcludeFile(file, excludePatterns))
+      .toList();
 }
