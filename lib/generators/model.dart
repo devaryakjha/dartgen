@@ -188,26 +188,67 @@ class MapOfFields extends _FieldProcessor {
         toMap += "'$key': $name${dot}value,\n";
         patcher += "$name = $type.parse(_data['$key'])";
       } else if (typeName == 'Map') {
+        // Determine the output key type for toMap - use the actual key type for primitives
+        final isKeyPrimitive = ['String', 'num', 'bool', 'int', 'double', 'dynamic'].contains(leftName);
+        final mapKeyType = isKeyPrimitive ? leftName : 'dynamic';
+
         if (['String', 'num', 'bool', 'dynamic'].contains(rightName)) {
-          toMap += "'$key': $name,\n";
+          // For primitive values with any key type, preserve the key type
+          if (isKeyPrimitive) {
+            toMap += "'$key': $name,\n";
+          } else {
+            toMap += "'$key': $name${dot}map<dynamic, dynamic>((k,v) => MapEntry(k, v)),\n";
+          }
           patcher +=
               "$name = (_data['$key'] as Map?)?.map<$leftName, $rightName>((k, v) => MapEntry(k as $leftName, v as $rightName))";
         } else if (rightName == 'int') {
-          toMap += "'$key': $name,\n";
+          if (isKeyPrimitive) {
+            toMap += "'$key': $name,\n";
+          } else {
+            toMap += "'$key': $name${dot}map<dynamic, dynamic>((k,v) => MapEntry(k, v)),\n";
+          }
           patcher +=
               "$name = (_data['$key'] as Map?)?.map<$leftName, $rightName>((k, v) => MapEntry(k as $leftName, v ~/ 1))";
         } else if (rightName == 'double') {
-          toMap += "'$key': $name,\n";
+          if (isKeyPrimitive) {
+            toMap += "'$key': $name,\n";
+          } else {
+            toMap += "'$key': $name${dot}map<dynamic, dynamic>((k,v) => MapEntry(k, v)),\n";
+          }
           patcher +=
               "$name = (_data['$key'] as Map?)?.map<$leftName, $rightName>((k, v) => MapEntry(k as $leftName, v * 1.0))";
         } else if (enums.contains(rightName)) {
           toMap +=
-              "'$key': $name${dot}map<String, dynamic>((k,v) => MapEntry(k, v${rightDot}value)),\n";
+              "'$key': $name${dot}map<$mapKeyType, dynamic>((k,v) => MapEntry(k, v${rightDot}value)),\n";
           patcher +=
               "$name = (_data['$key'] as Map?)?.map<$leftName, $rightName>((k, v) => MapEntry(k as $leftName, $rightName.parse(v)$rightExcl))";
+        } else if (rightName == 'List') {
+          // Handle Map<K, List<V>> types
+          final listValueType = (rightType?.typeArguments?.arguments.elementAtOrNull(0) as NamedType?);
+          final listValueName = listValueType?.name.toString() ?? 'dynamic';
+          final listValueDot = (listValueType?.question?.toString() ?? '') + '.';
+          final listValueExcl = listValueType?.question == null ? '!' : '';
+          // Get the full type string for the List (e.g., "List<Address>")
+          final fullListType = rightType.toString().replaceAll('\$', '').replaceAll('?', '');
+
+          if (['String', 'num', 'bool', 'dynamic', 'int', 'double'].contains(listValueName)) {
+            toMap += "'$key': $name,\n";
+            patcher +=
+                "$name = (_data['$key'] as Map?)?.map<$leftName, $fullListType>((k, v) => MapEntry(k as $leftName, (v as List?)?.cast<$listValueName>() ?? []))";
+          } else if (enums.contains(listValueName)) {
+            toMap +=
+                "'$key': $name${dot}map<$mapKeyType, dynamic>((k,v) => MapEntry(k, v${rightDot}map((i) => i${listValueDot}value).toList())),\n";
+            patcher +=
+                "$name = (_data['$key'] as Map?)?.map<$leftName, $fullListType>((k, v) => MapEntry(k as $leftName, (v as List?)?.map((i) => $listValueName.parse(i)$listValueExcl).toList().cast<$listValueName>() ?? []))";
+          } else {
+            toMap +=
+                "'$key': $name${dot}map<$mapKeyType, dynamic>((k,v) => MapEntry(k, v${rightDot}map((i) => i${listValueDot}toMap()).toList())),\n";
+            patcher +=
+                "$name = (_data['$key'] as Map?)?.map<$leftName, $fullListType>((k, v) => MapEntry(k as $leftName, (v as List?)?.map((i) => $listValueName.fromMap(i)$listValueExcl).toList().cast<$listValueName>() ?? []))";
+          }
         } else {
           toMap +=
-              "'$key': $name${dot}map<String, dynamic>((k,v) => MapEntry(k, v${rightDot}toMap())),\n";
+              "'$key': $name${dot}map<$mapKeyType, dynamic>((k,v) => MapEntry(k, v${rightDot}toMap())),\n";
           patcher +=
               "$name = (_data['$key'] as Map?)?.map<$leftName, $rightName>((k, v) => MapEntry(k as $leftName, $rightName.fromMap(v)$rightExcl))";
         }
