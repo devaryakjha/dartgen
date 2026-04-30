@@ -140,10 +140,13 @@ class MapOfFields extends _FieldProcessor {
 
     var usingToDouble = false;
     var usingToDecimal = false;
+    var usingToDateTime = false;
     final toDouble =
         'final toDouble = (val) => val == null ? null : val * 1.0;\n';
     final toDecimal =
         'final toDecimal = (val) => val == null ? null : Decimal.parse(val.toString());\n';
+    final toDateTime =
+        'DateTime? toDateTime(val) => val == null ? null : DateTime.parse(val.toString());\n';
 
     for (var member in members) {
       if (!(member is FieldDeclaration)) continue;
@@ -190,19 +193,40 @@ class MapOfFields extends _FieldProcessor {
         toMap += "'$key': $name${dot}toDouble(),\n";
         patcher += "$name = toDecimal(_data['$key'])";
         usingToDecimal = true;
+      } else if (type == 'DateTime') {
+        toMap += "'$key': $name${dot}toIso8601String(),\n";
+        patcher += "$name = toDateTime(_data['$key'])";
+        usingToDateTime = true;
       } else if (enums.contains(type)) {
         toMap += "'$key': $name${dot}value,\n";
         patcher += "$name = $type.parse(_data['$key'])";
       } else if (typeName == 'Map') {
         // Determine if key needs string conversion for JSON serialization
         final isKeyString = leftName == 'String';
-        final needsKeyConversion = !isKeyString && ['num', 'bool', 'int', 'double'].contains(leftName);
+        final isKeyPrimitive =
+            ['num', 'bool', 'int', 'double'].contains(leftName);
+        final isKeyEnum = enums.contains(leftName);
+        final isKeyDateTime = leftName == 'DateTime';
+        final isKeySupported =
+            isKeyString || isKeyPrimitive || isKeyEnum || isKeyDateTime;
+        if (!isKeySupported) {
+          throw StateError(
+              "Unsupported map key type '$leftName' for field '$name'. Supported key types: String, num, bool, int, double, DateTime, enums.");
+        }
+        final needsKeyConversion = !isKeyString;
 
         // Helper to convert key to string in toMap
-        final keyToString = needsKeyConversion ? 'k.toString()' : 'k';
+        final keyToString = isKeyString
+            ? 'k'
+            : (isKeyPrimitive
+                ? 'k.toString()'
+                : (isKeyEnum ? 'k.value' : 'k.toIso8601String()'));
 
         // Helper to parse key from string in patcher
         String parseKey(String keyType) {
+          if (enums.contains(keyType)) {
+            return '$keyType.parse(k)$leftExcl';
+          }
           switch (keyType) {
             case 'int':
               return 'int.parse(k)';
@@ -212,17 +236,21 @@ class MapOfFields extends _FieldProcessor {
               return 'num.parse(k)';
             case 'bool':
               return "k == 'true'";
+            case 'DateTime':
+              return 'DateTime.parse(k)';
             default:
               return 'k as $keyType';
           }
         }
 
-        final parsedKey = needsKeyConversion ? parseKey(leftName) : 'k as $leftName';
+        final parsedKey =
+            needsKeyConversion ? parseKey(leftName) : 'k as $leftName';
 
         if (['String', 'num', 'bool', 'dynamic'].contains(rightName)) {
           // For primitive values
           if (needsKeyConversion || leftName == 'dynamic') {
-            toMap += "'$key': $name${dot}map<String, dynamic>((k,v) => MapEntry($keyToString, v)),\n";
+            toMap +=
+                "'$key': $name${dot}map<String, dynamic>((k,v) => MapEntry($keyToString, v)),\n";
           } else {
             toMap += "'$key': $name,\n";
           }
@@ -230,7 +258,8 @@ class MapOfFields extends _FieldProcessor {
               "$name = (_data['$key'] as Map?)?.map<$leftName, $rightName>((k, v) => MapEntry($parsedKey, v as $rightName))";
         } else if (rightName == 'int') {
           if (needsKeyConversion || leftName == 'dynamic') {
-            toMap += "'$key': $name${dot}map<String, dynamic>((k,v) => MapEntry($keyToString, v)),\n";
+            toMap +=
+                "'$key': $name${dot}map<String, dynamic>((k,v) => MapEntry($keyToString, v)),\n";
           } else {
             toMap += "'$key': $name,\n";
           }
@@ -238,7 +267,8 @@ class MapOfFields extends _FieldProcessor {
               "$name = (_data['$key'] as Map?)?.map<$leftName, $rightName>((k, v) => MapEntry($parsedKey, v ~/ 1))";
         } else if (rightName == 'double') {
           if (needsKeyConversion || leftName == 'dynamic') {
-            toMap += "'$key': $name${dot}map<String, dynamic>((k,v) => MapEntry($keyToString, v)),\n";
+            toMap +=
+                "'$key': $name${dot}map<String, dynamic>((k,v) => MapEntry($keyToString, v)),\n";
           } else {
             toMap += "'$key': $name,\n";
           }
@@ -249,18 +279,29 @@ class MapOfFields extends _FieldProcessor {
               "'$key': $name${dot}map<String, dynamic>((k,v) => MapEntry($keyToString, v${rightDot}value)),\n";
           patcher +=
               "$name = (_data['$key'] as Map?)?.map<$leftName, $rightName>((k, v) => MapEntry($parsedKey, $rightName.parse(v)$rightExcl))";
+        } else if (rightName == 'DateTime') {
+          toMap +=
+              "'$key': $name${dot}map<String, dynamic>((k,v) => MapEntry($keyToString, v${rightDot}toIso8601String())),\n";
+          patcher +=
+              "$name = (_data['$key'] as Map?)?.map<$leftName, $rightName>((k, v) => MapEntry($parsedKey, toDateTime(v)$rightExcl))";
+          usingToDateTime = true;
         } else if (rightName == 'List') {
           // Handle Map<K, List<V>> types
-          final listValueType = (rightType?.typeArguments?.arguments.elementAtOrNull(0) as NamedType?);
+          final listValueType = (rightType?.typeArguments?.arguments
+              .elementAtOrNull(0) as NamedType?);
           final listValueName = listValueType?.name.toString() ?? 'dynamic';
-          final listValueDot = (listValueType?.question?.toString() ?? '') + '.';
+          final listValueDot =
+              (listValueType?.question?.toString() ?? '') + '.';
           final listValueExcl = listValueType?.question == null ? '!' : '';
           // Get the full type string for the List (e.g., "List<Address>")
-          final fullListType = rightType.toString().replaceAll('\$', '').replaceAll('?', '');
+          final fullListType =
+              rightType.toString().replaceAll('\$', '').replaceAll('?', '');
 
-          if (['String', 'num', 'bool', 'dynamic', 'int', 'double'].contains(listValueName)) {
+          if (['String', 'num', 'bool', 'dynamic', 'int', 'double']
+              .contains(listValueName)) {
             if (needsKeyConversion || leftName == 'dynamic') {
-              toMap += "'$key': $name${dot}map<String, dynamic>((k,v) => MapEntry($keyToString, v)),\n";
+              toMap +=
+                  "'$key': $name${dot}map<String, dynamic>((k,v) => MapEntry($keyToString, v)),\n";
             } else {
               toMap += "'$key': $name,\n";
             }
@@ -271,6 +312,12 @@ class MapOfFields extends _FieldProcessor {
                 "'$key': $name${dot}map<String, dynamic>((k,v) => MapEntry($keyToString, v${rightDot}map((i) => i${listValueDot}value).toList())),\n";
             patcher +=
                 "$name = (_data['$key'] as Map?)?.map<$leftName, $fullListType>((k, v) => MapEntry($parsedKey, (v as List?)?.map((i) => $listValueName.parse(i)$listValueExcl).toList().cast<$listValueName>() ?? []))";
+          } else if (listValueName == 'DateTime') {
+            toMap +=
+                "'$key': $name${dot}map<String, dynamic>((k,v) => MapEntry($keyToString, v${rightDot}map((i) => i${listValueDot}toIso8601String()).toList())),\n";
+            patcher +=
+                "$name = (_data['$key'] as Map?)?.map<$leftName, $fullListType>((k, v) => MapEntry($parsedKey, (v as List?)?.map((i) => toDateTime(i)$listValueExcl).toList().cast<$listValueName>() ?? []))";
+            usingToDateTime = true;
           } else {
             toMap +=
                 "'$key': $name${dot}map<String, dynamic>((k,v) => MapEntry($keyToString, v${rightDot}map((i) => i${listValueDot}toMap()).toList())),\n";
@@ -300,6 +347,12 @@ class MapOfFields extends _FieldProcessor {
               "'$key': $name${dot}map((i) => i${leftDot}value).toList(),\n";
           patcher +=
               "$name = _data['$key']?.map((i) => $leftName.parse(i)$leftExcl).toList().cast<$leftName>()";
+        } else if (leftName == 'DateTime') {
+          toMap +=
+              "'$key': $name${dot}map((i) => i${leftDot}toIso8601String()).toList(),\n";
+          patcher +=
+              "$name = _data['$key']?.map((i) => toDateTime(i)$leftExcl).toList().cast<$leftName>()";
+          usingToDateTime = true;
         } else {
           toMap +=
               "'$key': $name${dot}map((i) => i${leftDot}toMap()).toList(),\n";
@@ -318,6 +371,7 @@ class MapOfFields extends _FieldProcessor {
     void patch(Map? _data) { if(_data == null) return;
       ${usingToDouble ? toDouble : ''}
       ${usingToDecimal ? toDecimal : ''}
+      ${usingToDateTime ? toDateTime : ''}
       $patcher
     }
 
@@ -385,6 +439,8 @@ class SerializeFields extends _FieldProcessor {
         serialize += "'$name': $name,";
       } else if (type == 'Decimal') {
         serialize += "'$name': $name${dot}toDouble(),";
+      } else if (type == 'DateTime') {
+        serialize += "'$name': $name${dot}toIso8601String(),";
       } else if (enums.contains(type)) {
         serialize += "'$name': $name${dot}value,";
       } else if (type.contains('Map<')) {
@@ -407,21 +463,35 @@ class SerializeFields extends _FieldProcessor {
 
         // Determine if key needs string conversion for JSON serialization
         final isKeyString = keyType == 'String';
-        final needsKeyConversion =
-            !isKeyString && ['num', 'bool', 'int', 'double'].contains(keyType);
-        final keyExpr = needsKeyConversion ? 'k.toString()' : 'k';
+        final isKeyPrimitive =
+            ['num', 'bool', 'int', 'double'].contains(keyType);
+        final isKeyEnum = enums.contains(keyType);
+        final isKeyDateTime = keyType == 'DateTime';
+        final isKeySupported =
+            isKeyString || isKeyPrimitive || isKeyEnum || isKeyDateTime;
+        if (!isKeySupported) {
+          throw StateError(
+              "Unsupported map key type '$keyType' for field '$name'. Supported key types: String, num, bool, int, double, DateTime, enums.");
+        }
+        final needsKeyConversion = !isKeyString;
+        final keyExpr = isKeyString
+            ? 'k'
+            : (isKeyPrimitive
+                ? 'k.toString()'
+                : (isKeyEnum ? 'k.value' : 'k.toIso8601String()'));
 
         // Check if value is a generic type parameter from class declaration
         final isGenericValueType = typeParams.contains(valueType);
 
-        var valueExpr = isGenericValueType
-            ? 'v?.serialize()'
-            : 'v${valueDot}serialize()';
+        var valueExpr =
+            isGenericValueType ? 'v?.serialize()' : 'v${valueDot}serialize()';
 
         if (primitives.contains(valueType)) {
           valueExpr = 'v';
         } else if (enums.contains(valueType)) {
           valueExpr = 'v${valueDot}value';
+        } else if (valueType == 'DateTime') {
+          valueExpr = 'v${valueDot}toIso8601String()';
         } else if (valueType.startsWith('List<')) {
           var listPrimitive =
               valueType.replaceAll('List<', '').replaceAll('>', '');
@@ -430,6 +500,8 @@ class SerializeFields extends _FieldProcessor {
             valueExpr = 'v';
           } else if (enums.contains(listPrimitive)) {
             valueExpr = 'v${valueDot}map((i) => i.value).toList()';
+          } else if (listPrimitive == 'DateTime') {
+            valueExpr = 'v${valueDot}map((i) => i.toIso8601String()).toList()';
           } else if (isGenericListType) {
             valueExpr =
                 'v${valueDot}map((dynamic i) => i?.serialize()).toList()';
@@ -457,6 +529,9 @@ class SerializeFields extends _FieldProcessor {
           serialize += "'$name': $name,";
         } else if (enums.contains(listPrimitive)) {
           serialize += "'$name': $name$dotMap((i) => i.value).toList(),";
+        } else if (listPrimitive == 'DateTime') {
+          serialize +=
+              "'$name': $name$dotMap((i) => i.toIso8601String()).toList(),";
         } else if (isGenericType) {
           // For generic types, use dynamic with null-safe call since T might not have serialize()
           serialize +=
